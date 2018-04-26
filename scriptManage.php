@@ -3,9 +3,11 @@
 class scriptManage
 {
 	private $params;
+	private $swoole_table;
 	
 	public function __construct()
 	{
+		//解析参数
 		$this->params = $this->parseParam();
 	}
 	
@@ -48,6 +50,15 @@ class scriptManage
 		}
 	}
 	
+	//初始化内存
+	private function iniMemory()
+	{
+		$this->swoole_table = new \Swoole\Table(500);
+		$this->swoole_table->column('name', swoole_table::TYPE_STRING, 50);
+		$this->swoole_table->column('pipe', swoole_table::TYPE_INT, 10);
+		$this->swoole_table->create();		
+	}
+	
 	
 	/**
 	* 开始
@@ -55,18 +66,24 @@ class scriptManage
 	private function start()
 	{
 		swoole_set_process_name('scrimage');
+		$this->iniMemory();
 		
 		foreach ($this->getConfig() as $config) {			
 			if (!$this->ifRunning($config['run_id'])) {
 							
 				$process = new swoole_process(function($worker) use ($config) {
 					
-					swoole_set_process_name('test');
+					swoole_set_process_name($config['name']);
+					sleep(rand(2,5));
 					$worker->exec($config['exec_file'], $config['content']);
 					//system("{$config['exec_file']} {$config['content']}");
 					
 				}, true);
 				$process->start();
+				$this->swoole_table->set($process->pid, array(
+					'name' => $config['name'],
+					'pipe' => $process->pipe
+				));
 				
 				//写入日志
 				swoole_event_add($process->pipe, function($pipe) use ($process) {
@@ -75,7 +92,7 @@ class scriptManage
 					if ($recv) {
 						
 						var_dump($recv);	
-						
+					
 					}
 				});
 			}
@@ -85,10 +102,14 @@ class scriptManage
 		swoole_process::signal(SIGCHLD, function($sig) {
 			
 			  while($ret =  swoole_process::wait(false)) {
-				  echo "PID={$ret['pid']}\n";
+				  
+				  if ($result = $this->swoole_table->get($ret['pid'])) {
+					  //结束日志监听
+					  swoole_event_del($result['pipe']);
+				  }
 			  }
-		  
 		});
+		
 	}
 	
 	/**
@@ -129,7 +150,16 @@ class scriptManage
 				'exec_file' => '/usr/local/php-7.1.8/bin/php',
 				'type' => 'command',
 				'content' => array('/work/test/test.php'),
-				'log_path' => '/tmp/test.log'
+				'log_path' => '/tmp/test.log',
+				'name' => 'test'
+			),
+			array(
+				'run_id' => '1137eecda98fadab99487b0e3f52339f',
+				'exec_file' => '/usr/local/php-7.1.8/bin/php',
+				'type' => 'command',
+				'content' => array('/work/test/test.php'),
+				'log_path' => '/tmp/test.log',
+				'name' => 'test'
 			)
 		
 		);		
