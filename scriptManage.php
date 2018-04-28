@@ -4,6 +4,7 @@ class scriptManage
 {
 	private $params;
 	private $swoole_table;
+    private $reloadPid;
 	
 	public function __construct()
 	{
@@ -67,50 +68,66 @@ class scriptManage
 	{
 		swoole_set_process_name('scrimage');
 		$this->iniMemory();
-		
-		foreach ($this->getConfig() as $config) {			
-			if (!$this->ifRunning($config['run_id'])) {
-							
-				$process = new swoole_process(function($worker) use ($config) {
-					
-					swoole_set_process_name($config['name']);
-					sleep(rand(2,5));
-					$worker->exec($config['exec_file'], $config['content']);
-					//system("{$config['exec_file']} {$config['content']}");
-					
-				}, true);
-				$process->start();
-				$this->swoole_table->set($process->pid, array(
-					'name' => $config['name'],
-					'pipe' => $process->pipe
-				));
-				
-				//写入日志
-				swoole_event_add($process->pipe, function($pipe) use ($process) {
-					
-					$recv = $process->read();
-					if ($recv) {
-						
-						var_dump($recv);	
-					
-					}
-				});
-			}
-		}		
-		
+
 		//信号监听
 		swoole_process::signal(SIGCHLD, function($sig) {
 			
-			  while($ret =  swoole_process::wait(false)) {
+			  while($ret = swoole_process::wait(false)) {
 				  
 				  if ($result = $this->swoole_table->get($ret['pid'])) {
 					  //结束日志监听
 					  swoole_event_del($result['pipe']);
-				  }
+                      
+                      //删除缓存
+                      $this->swoole_table->del($ret['pid']);
+                      
+                      //重启进程
+                      if ($config = $this->getConfig($result['name'])) {
+                        $this->log("restart process " . $result['name']);
+                        $this->setProcess($config);
+                      }
+                      
+				  } elseif ($ret['pid'] == $this->reloadPid) {
+                      $this->log("restart reload ");
+                      $this->reload();
+                  }
 			  }
 		});
 		
+        $this->reload();
 	}
+    
+    /**
+    * 生成进程
+    */
+    private function setProcess($config)
+    {			
+		if (!$this->ifRunning($config['name'])) {
+            $process = new swoole_process(function($worker) use ($config) {
+                
+                swoole_set_process_name($config['name']);
+                $worker->exec($config['exec_file'], $config['content']);
+                
+            }, true);
+            $process->start();
+            $this->swoole_table->set($process->pid, array(
+                'name' => $config['name'],
+                'pipe' => $process->pipe,
+            ));
+            
+            //写入日志
+            swoole_event_add($process->pipe, function($pipe) use ($process, $config) {                
+                $recv = $process->read();
+                if ($recv) {
+                    file_put_contents($config['log_path'], $recv, FILE_APPEND);
+                }
+            });
+           
+            $this->log("set process " . $config['name'] . " success");
+		} else {
+            $this->log("{$config['name']} is running");
+        }
+    }
 	
 	/**
 	* 获取参数
@@ -132,42 +149,81 @@ class scriptManage
 	
 	/**
 	* 判断是否正在运行
-	**/
-	private function ifRunning($runId)
+	*/
+	private function ifRunning($name)
 	{
-		return false;		
+        foreach ($this->swoole_table as $row => $value) {
+            if ($value['name'] == $name) {
+                return true;
+            }
+        }
+        return false;
 	}
 	
 	/**
-	* 获取配置
+	* 重刷
 	*
-	**/
-	private function getConfig()
+	*/
+	private function reload()
 	{
-		return array(
-			array(
-				'run_id' => '1137eecda98fadab99487b0e3f52339f',
-				'exec_file' => '/usr/local/php-7.1.8/bin/php',
-				'type' => 'command',
-				'content' => array('/work/test/test.php'),
-				'log_path' => '/tmp/test.log',
-				'name' => 'test'
-			),
-			array(
-				'run_id' => '1137eecda98fadab99487b0e3f52339f',
-				'exec_file' => '/usr/local/php-7.1.8/bin/php',
-				'type' => 'command',
-				'content' => array('/work/test/test.php'),
-				'log_path' => '/tmp/test.log',
-				'name' => 'test'
-			)
-		
-		);		
+        $process = new swoole_process(function($worker) {
+            while (true) {
+                if ($data = $this->getConfig()) {
+                    foreach ($data as $v) {
+                        if (!$this->ifRunning($v['name'])) {
+                            $worker->write(json_encode($v));
+                        }
+                    }
+                }
+                
+                sleep(60);
+            }
+        });
+        $process->start();
+        
+        $this->reloadPid = $process->pid;
+        swoole_event_add($process->pipe, function($pipe) use ($process) {
+            
+            $recv = $process->read();
+            if ($data = json_decode($recv, true)) {
+                $this->log("start process " . $data['name']);
+                $this->setProcess($data);
+            } else {
+                $this->log("can't parse config " . $recv);
+            }        
+            
+        }); 
+
 	}
+    
+    /**
+    *获取配置
+				'exec_file' => '/usr/local/php-7.1.8/bin/php',
+				'type' => 'command',
+				'content' => array('/work/test/test.php'),
+				'log_path' => '/tmp/test.log',
+				'name' => 'test'
+    
+    */
+    private function getConfig($name = false)
+    {
+        $content = file_get_contents('/tmp/config');
+        $datas = json_decode($content, true);
+        
+        if ($name) {
+            foreach ($datas as $data) {
+                if ($data['name'] == $name) {
+                    return $data;
+                }
+            }
+        } else {
+            return $datas;
+        }
+    }
 	
 	private function log($msg)
 	{
-		echo $msg . PHP_EOL;
+		echo date('Y-m-d H:i:s ') . $msg . PHP_EOL;
 	}
 	
 	
